@@ -1,6 +1,7 @@
 /* ============================================
    SALAR KING 👑 — Unified Operations Dashboard
    Two independent modules: BomberApp & GatewayApp
+   Fixed CORS proxy fallback chain for SMS Bomber
    ============================================ */
 
 (function () {
@@ -106,36 +107,79 @@
 
         async sendBomb(cleanPhone, count) {
             const url = `${this.API_BASE}?phone=${cleanPhone}&count=${count}`;
+            const encodedUrl = encodeURIComponent(url);
 
-            try {
-                let response;
+            const proxyChain = [
+                {
+                    name: 'direct',
+                    fetch: () => fetch(url, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' }
+                    }),
+                    parse: (response) => response.json()
+                },
+                {
+                    name: 'allorigins',
+                    fetch: () => fetch(`https://api.allorigins.win/get?url=${encodedUrl}`, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' }
+                    }),
+                    parse: async (response) => {
+                        const wrapped = await response.json();
+                        if (wrapped && wrapped.contents) {
+                            return JSON.parse(wrapped.contents);
+                        }
+                        throw new Error('Invalid proxy response format');
+                    }
+                },
+                {
+                    name: 'corsproxy-org',
+                    fetch: () => fetch(`https://corsproxy.org/?${encodedUrl}`, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' }
+                    }),
+                    parse: (response) => response.json()
+                },
+                {
+                    name: 'thingproxy',
+                    fetch: () => fetch(`https://thingproxy.freeboard.io/fetch/${url}`, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' }
+                    }),
+                    parse: (response) => response.json()
+                }
+            ];
+
+            let lastError = null;
+
+            for (const proxy of proxyChain) {
                 try {
-                    response = await fetch(url, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    });
-                } catch (corsError) {
-                    console.warn('[Bomber] CORS error, routing through proxy...');
-                    const proxyUrl = `https://corsproxy.io/?${encodeURIComponent(url)}`;
-                    response = await fetch(proxyUrl, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    });
-                }
+                    console.log(`[Bomber] Trying ${proxy.name}...`);
+                    const response = await proxy.fetch();
 
-                const data = await response.json();
+                    if (!response.ok) {
+                        throw new Error(`HTTP ${response.status}`);
+                    }
 
-                if (response.ok && data.status === 'success') {
-                    this.setResponse(`✅ ${data.message || 'Strike successful! Target hit.'}`, 'success');
-                } else {
-                    const errMsg = data.message || data.error || 'Server responded with an error.';
-                    this.setResponse(`❌ ${errMsg}`, 'error');
+                    const data = await proxy.parse(response);
+
+                    if (data && data.status === 'success') {
+                        this.setResponse(`✅ ${data.message || 'Strike successful! Target hit.'}`, 'success');
+                        return;
+                    } else if (data && (data.message || data.error)) {
+                        const errMsg = data.message || data.error;
+                        this.setResponse(`❌ ${errMsg}`, 'error');
+                        return;
+                    } else {
+                        throw new Error('Unexpected response structure');
+                    }
+                } catch (error) {
+                    console.warn(`[Bomber] ${proxy.name} failed:`, error.message);
+                    lastError = error;
                 }
-            } catch (error) {
-                this.setResponse(`❌ System Error: ${error.message}`, 'error');
-            } finally {
-                this.setBtnLoading(false);
             }
+
+            this.setResponse(`❌ All connection routes failed. Last error: ${lastError ? lastError.message : 'Unknown error'}`, 'error');
         }
     };
 
